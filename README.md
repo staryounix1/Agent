@@ -55,3 +55,20 @@ XAI_API_KEY=...   # أو GROK_API_KEY
 ## النشر
 
 المشروع جاهز لـ Vercel: بناء Vite ثابت + دالة `api/grok-video.js`. لا يحتاج قاعدة بيانات ولا خادمًا دائمًا.
+
+## نسخة أندرويد (APK)
+
+التطبيق مغلّف بـ Capacitor، فيعمل داخل WebView مع تخزين محلي كامل (بدون إنترنت).
+
+```bash
+npm run build            # يبني الواجهة إلى dist/
+npx cap sync android     # ينسخ الواجهة إلى مشروع أندرويد
+cd android && ./gradlew assembleDebug
+```
+
+الملف الناتج: `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+- يحتاج `ANDROID_HOME` إلى Android SDK (platform 35 + build-tools 35) وJDK 21.
+- APK الـ debug قابل للتثبيت مباشرة؛ للنشر في Google Play يلزم توقيع نسخة release بمفتاحك (لا تضعه في الريبو — `*.jks` مستثنى).
+- دالة `api/grok-video.js` تعمل على Vercel فقط، وليست داخل الـ APK؛ باقي المسار (المحادثة، السكريبت، المونتاج، التصدير، النشر) يعمل دون خادم.
+- الميكروفون والكاميرا مُصرّح بهما في `AndroidManifest.xml` لتسجيل الصوت والتقاط الصور من الهاتف.

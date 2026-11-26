@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">مشهد</string>
+    <string name="title_activity_main">مشهد</string>
+    <string name="package_name">app.mashhad.video</string>
+    <string name="custom_url_scheme">app.mashhad.video</string>
+</resources>
