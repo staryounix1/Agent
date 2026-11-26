@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { StoreProvider, useStore } from './store';
 import { Button, ToastProvider, Icon, IconButton } from './ui';
 import { ChatView } from './views/Chat';
+import { SettingsView } from './views/Settings';
 import { ProjectsView } from './views/Projects';
 import { ScriptView } from './views/Script';
 import { ScenesView } from './views/Scenes';
@@ -11,7 +12,7 @@ import { InsightsView } from './views/Insights';
 import { initAnalytics } from './lib/analytics';
 import type { View } from './types';
 
-type Route = View | 'insights' | 'chat';
+type Route = View | 'insights' | 'settings' | 'chat';
 
 const NAV: { id: View; label: string; icon: 'layers' | 'script' | 'image' | 'film' | 'send' }[] = [
   { id: 'projects', label: 'المشاريع', icon: 'layers' },
@@ -29,6 +30,7 @@ const TITLES: Record<Route, string> = {
   edit: 'المونتاج',
   publish: 'النشر',
   insights: 'الأحداث',
+  settings: 'الإعدادات',
 };
 
 function Shell() {
@@ -77,6 +79,7 @@ function Shell() {
             >
               الاستوديو
             </Button>
+            <IconButton icon="gear" label="الإعدادات" onClick={() => setRoute('settings')} />
             <IconButton icon="chart" label="الأحداث" onClick={() => setRoute('insights')} />
           </div>
         </header>
@@ -131,6 +134,15 @@ function Shell() {
             <Icon name="chart" size={18} />
             الأحداث
           </button>
+          <button
+            type="button"
+            className={`navitem ${route === 'settings' ? 'is-active' : ''}`}
+            onClick={() => setRoute('settings')}
+            aria-current={route === 'settings' ? 'page' : undefined}
+          >
+            <Icon name="gear" size={18} />
+            الإعدادات
+          </button>
         </nav>
 
         <div className="rail__foot">
@@ -163,6 +175,7 @@ function Shell() {
           </span>
           <span className="topbar__title">{project ? project.title : TITLES[route]}</span>
           <IconButton icon="sparkles" label="المساعد" onClick={() => setRoute('chat')} />
+          <IconButton icon="gear" label="الإعدادات" onClick={() => setRoute('settings')} />
           <IconButton icon="chart" label="الأحداث" onClick={() => setRoute('insights')} />
         </div>
 
@@ -173,6 +186,7 @@ function Shell() {
           {route === 'edit' ? <EditView onGo={go} /> : null}
           {route === 'publish' ? <PublishView onGo={go} /> : null}
           {route === 'insights' ? <InsightsView /> : null}
+          {route === 'settings' ? <SettingsView /> : null}
         </main>
 
         <nav className="bottomnav" aria-label="التنقل السفلي">

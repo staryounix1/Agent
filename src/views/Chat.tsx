@@ -11,6 +11,8 @@ import { sceneCardBlob } from '../lib/cards';
 import type { VisualFrame } from '../lib/render';
 import { type ChatStep, TEMPLATE_LABEL, ideasFor, inferTemplate, parseCommand, parseSeconds } from '../lib/chat';
 import { track } from '../lib/analytics';
+import { activeProvider, isReady } from '../lib/providers';
+import { generateSceneImage, generateScript, imageSupported, textSupported } from '../lib/ai';
 
 const CHAT_KEY = 'mashhad.chat.v1';
 
@@ -173,15 +175,31 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
         const publishMeta = buildMeta({ ...project, scenes: nextScenes }, series.name);
         const { w, h } = dimensionsFor(project);
 
+        const imageProvider = activeProvider('image');
+        const useProvider = imageProvider.kind !== 'local' && isReady(imageProvider) && imageSupported(imageProvider);
         const imageIds = new Map<string, string>();
         for (const [index, scene] of nextScenes.entries()) {
           const id = newId('im');
+          let blob: Blob = sceneCardBlob(index, w, h);
+          let mime = 'image/svg+xml';
+          let name = `${scene.id}.svg`;
+          if (useProvider) {
+            try {
+              blob = await generateSceneImage(imageProvider, scene.visual || scene.text, draft.aspect);
+              mime = blob.type || 'image/png';
+              name = `${scene.id}.png`;
+            } catch (error) {
+              if (index === 0) {
+                toast(error instanceof Error ? error.message : 'تعذّر توليد صور المزوّد', 'error');
+              }
+            }
+          }
           await putAsset({
             id,
             kind: 'image',
-            name: `${scene.id}.svg`,
-            mime: 'image/svg+xml',
-            blob: sceneCardBlob(index, w, h),
+            name,
+            mime,
+            blob,
             width: w,
             height: h,
             createdAt: Date.now(),
@@ -368,6 +386,33 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
       if (step === 'length') {
         const seconds = parseSeconds(text) ?? 30;
         setDraft((d) => ({ ...d, seconds }));
+        const provider = activeProvider('text');
+        if (provider.kind !== 'local' && isReady(provider) && textSupported(provider)) {
+          push({ id: newId('ms'), role: 'ai', text: `كنكتب السكريبت عبر ${provider.label}…` });
+          try {
+            const next = await generateScript(provider, {
+              idea: draft.idea,
+              template: draft.template,
+              seconds,
+              lang: draft.lang,
+            });
+            setScenes(next);
+            setStep('script');
+            push(
+              scriptMessage(
+                `كتبت ${next.length} مشاهد عبر ${provider.label}. تقدر تبدّل: كتب «مشهد 2: النص الجديد». ملي يعجبك، اضغط اصنع الفيديو.`,
+              ),
+            );
+            return;
+          } catch (error) {
+            toast(error instanceof Error ? error.message : 'تعذّر الاتصال بالمزوّد', 'error');
+            push({
+              id: newId('ms'),
+              role: 'ai',
+              text: 'المزوّد ما جاوبش، رجعت للقوالب المحلية.',
+            });
+          }
+        }
         const next = generateScenes({ idea: draft.idea, lang: draft.lang, template: draft.template, seconds });
         setScenes(next);
         setStep('script');
