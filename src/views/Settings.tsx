@@ -244,7 +244,7 @@ export function SettingsView() {
                         icon="check"
                         onClick={() => void test(provider)}
                         disabled={testing === provider.id || !isReady(provider)}
-                        aria-label="تحقق من المفتاح"
+                        aria-label={`تحقق من مفتاح ${provider.label}`}
                       >
                         {testing === provider.id ? '…' : 'تحقق'}
                       </Button>

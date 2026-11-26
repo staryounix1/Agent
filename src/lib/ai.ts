@@ -61,17 +61,63 @@ function parseScenes(raw: string, lang: Lang): Scene[] {
   return scenes;
 }
 
+/** الرابط الأساسي بعد تنظيف المسافات والشرطة الأخيرة واللواحق الشائعة التي يلصقها المستخدم. */
+function baseOf(provider: Provider): string {
+  let base = provider.baseUrl.trim().replace(/\/+$/, '');
+  if (provider.kind === 'google') {
+    base = base.replace(/\/v1beta\/?.*$/, '').replace(/\/openai$/, '');
+    return base || 'https://generativelanguage.googleapis.com';
+  }
+  base = base.replace(/\/chat\/completions$/, '').replace(/\/images\/generations$/, '');
+  return base;
+}
+
+function keyOf(provider: Provider): string {
+  const key = provider.key.trim().replace(/^["']|["']$/g, '');
+  if (!key) throw new Error('المفتاح خالي — لصق المفتاح في الحقل أولًا.');
+  return key;
+}
+
+function authHeaders(provider: Provider): Record<string, string> {
+  const key = keyOf(provider);
+  if (provider.kind === 'google') return { 'x-goog-api-key': key };
+  if (provider.kind === 'elevenlabs') return { 'xi-api-key': key };
+  return { Authorization: `Bearer ${key}` };
+}
+
+/** يبني رسالة خطأ فيها نص المزوّد كما رجعه هو، بدل رمز الحالة وحده. */
+async function failure(response: Response, label: string): Promise<Error> {
+  let detail = '';
+  try {
+    const text = await response.text();
+    try {
+      const body = JSON.parse(text) as {
+        error?: { message?: string; status?: string } | string;
+        message?: string;
+      };
+      if (typeof body.error === 'string') detail = body.error;
+      else detail = body.error?.message ?? body.message ?? text;
+    } catch {
+      detail = text;
+    }
+  } catch {
+    detail = '';
+  }
+  detail = detail.replace(/\s+/g, ' ').trim().slice(0, 220);
+  return new Error(`${label} رفض الطلب (HTTP ${response.status})${detail ? `: ${detail}` : ''}`);
+}
+
 async function googleText(provider: Provider, prompt: string): Promise<string> {
-  const url = `${provider.baseUrl.replace(/\/$/, '')}/v1beta/models/${encodeURIComponent(provider.model)}:generateContent?key=${encodeURIComponent(provider.key)}`;
+  const url = `${baseOf(provider)}/v1beta/models/${encodeURIComponent(provider.model.trim())}:generateContent`;
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: { temperature: 0.9, responseMimeType: 'application/json' },
     }),
   });
-  if (!response.ok) throw new Error(`Google رجع ${response.status}`);
+  if (!response.ok) throw await failure(response, 'Google');
   const data = (await response.json()) as {
     candidates?: { content?: { parts?: { text?: string }[] } }[];
   };
@@ -81,15 +127,12 @@ async function googleText(provider: Provider, prompt: string): Promise<string> {
 }
 
 async function openAIText(provider: Provider, prompt: string): Promise<string> {
-  const url = `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`;
+  const url = `${baseOf(provider)}/chat/completions`;
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${provider.key}`,
-    },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
     body: JSON.stringify({
-      model: provider.model,
+      model: provider.model.trim(),
       temperature: 0.9,
       messages: [
         { role: 'system', content: 'أعد JSON صالحًا فقط دون أي شرح.' },
@@ -97,7 +140,7 @@ async function openAIText(provider: Provider, prompt: string): Promise<string> {
       ],
     }),
   });
-  if (!response.ok) throw new Error(`${provider.label} رجع ${response.status}`);
+  if (!response.ok) throw await failure(response, provider.label);
   const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
   const text = data.choices?.[0]?.message?.content ?? '';
   if (!text.trim()) throw new Error('المزوّد رجع ردًّا فارغًا');
@@ -141,19 +184,19 @@ function base64ToBlob(base64: string, mime: string): Blob {
 export async function generateSceneImage(provider: Provider, prompt: string, aspect: Aspect): Promise<Blob> {
   if (!imageSupported(provider)) throw new Error('هذا المزوّد لا يدعم الصور');
   const fullPrompt = `${prompt}. Cinematic stock-photo style, soft natural light, no text, no watermark, ${ASPECT_PROMPT[aspect]}.`;
-  const base = provider.baseUrl.replace(/\/$/, '');
+  const base = baseOf(provider);
 
   if (provider.kind === 'google') {
-    const url = `${base}/v1beta/models/${encodeURIComponent(provider.model)}:predict?key=${encodeURIComponent(provider.key)}`;
+    const url = `${base}/v1beta/models/${encodeURIComponent(provider.model.trim())}:predict`;
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
       body: JSON.stringify({
         instances: [{ prompt: fullPrompt }],
         parameters: { sampleCount: 1, aspectRatio: aspect },
       }),
     });
-    if (!response.ok) throw new Error(`Google Imagen رجع ${response.status}`);
+    if (!response.ok) throw await failure(response, 'Google Imagen');
     const data = (await response.json()) as { predictions?: { bytesBase64Encoded?: string; mimeType?: string }[] };
     const first = data.predictions?.[0];
     if (!first?.bytesBase64Encoded) throw new Error('Imagen رجع بلا صورة');
@@ -162,16 +205,16 @@ export async function generateSceneImage(provider: Provider, prompt: string, asp
 
   const response = await fetch(`${base}/images/generations`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${provider.key}` },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
     body: JSON.stringify({
-      model: provider.model,
+      model: provider.model.trim(),
       prompt: fullPrompt,
       n: 1,
       size: IMAGE_SIZE[aspect],
       response_format: 'b64_json',
     }),
   });
-  if (!response.ok) throw new Error(`${provider.label} رجع ${response.status}`);
+  if (!response.ok) throw await failure(response, provider.label);
   const data = (await response.json()) as { data?: { b64_json?: string; url?: string }[] };
   const first = data.data?.[0];
   if (first?.b64_json) return base64ToBlob(first.b64_json, 'image/png');
@@ -185,20 +228,21 @@ export async function generateSceneImage(provider: Provider, prompt: string, asp
 
 export async function testProvider(provider: Provider): Promise<string> {
   if (provider.kind === 'local') return 'المزوّد المحلي لا يحتاج مفتاحًا.';
-  const base = provider.baseUrl.replace(/\/$/, '');
+  const base = baseOf(provider);
   if (provider.kind === 'google') {
-    const response = await fetch(`${base}/v1beta/models?key=${encodeURIComponent(provider.key)}`);
-    if (!response.ok) throw new Error(`Google رجع ${response.status} — تأكد من المفتاح`);
+    const response = await fetch(`${base}/v1beta/models`, { headers: authHeaders(provider) });
+    if (!response.ok) throw await failure(response, 'Google');
     const data = (await response.json()) as { models?: { name?: string }[] };
-    const found = (data.models ?? []).some((model) => (model.name ?? '').includes(provider.model));
-    return found ? `المفتاح صالح و${provider.model} متاح.` : 'المفتاح صالح، لكن الموديل غير ظاهر في القائمة.';
+    const model = provider.model.trim();
+    const found = (data.models ?? []).some((item) => (item.name ?? '').includes(model));
+    return found ? `المفتاح صالح و${model} متاح.` : 'المفتاح صالح، لكن الموديل غير ظاهر في القائمة.';
   }
   if (provider.kind === 'elevenlabs') {
-    const response = await fetch(`${base}/user`, { headers: { 'xi-api-key': provider.key } });
-    if (!response.ok) throw new Error(`ElevenLabs رجع ${response.status} — تأكد من المفتاح`);
+    const response = await fetch(`${base}/user`, { headers: authHeaders(provider) });
+    if (!response.ok) throw await failure(response, 'ElevenLabs');
     return 'المفتاح صالح.';
   }
-  const response = await fetch(`${base}/models`, { headers: { Authorization: `Bearer ${provider.key}` } });
-  if (!response.ok) throw new Error(`${provider.label} رجع ${response.status} — تأكد من المفتاح والرابط`);
+  const response = await fetch(`${base}/models`, { headers: authHeaders(provider) });
+  if (!response.ok) throw await failure(response, provider.label);
   return 'المفتاح صالح والرابط يجيب.';
 }
