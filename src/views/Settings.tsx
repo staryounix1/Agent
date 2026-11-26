@@ -236,7 +236,7 @@ export function SettingsView() {
                         spellCheck={false}
                         value={provider.key}
                         onChange={(event) => update(provider.id, { key: event.target.value })}
-                        placeholder="sk-…"
+                        placeholder={provider.kind === 'pollinations' ? 'لا يحتاج مفتاحًا' : 'sk-…'}
                       />
                       <Button
                         size="sm"

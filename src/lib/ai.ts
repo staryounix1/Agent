@@ -171,8 +171,21 @@ const IMAGE_SIZE: Record<Aspect, string> = {
 };
 
 export function imageSupported(provider: Provider): boolean {
-  return provider.kind === 'google' || provider.kind === 'openai' || provider.kind === 'xai' || provider.kind === 'custom';
+  return (
+    provider.kind === 'google' ||
+    provider.kind === 'openai' ||
+    provider.kind === 'xai' ||
+    provider.kind === 'pollinations' ||
+    provider.kind === 'custom'
+  );
 }
+
+/** Pollinations مجاني وبلا مفتاح: صورة لكل 45 ثانية على الأكثر من نفس الشبكة. */
+const POLLINATIONS_SIZE: Record<Aspect, [number, number]> = {
+  '9:16': [432, 768],
+  '1:1': [768, 768],
+  '16:9': [768, 432],
+};
 
 function base64ToBlob(base64: string, mime: string): Blob {
   const binary = atob(base64);
@@ -185,6 +198,17 @@ export async function generateSceneImage(provider: Provider, prompt: string, asp
   if (!imageSupported(provider)) throw new Error('هذا المزوّد لا يدعم الصور');
   const fullPrompt = `${prompt}. Cinematic stock-photo style, soft natural light, no text, no watermark, ${ASPECT_PROMPT[aspect]}.`;
   const base = baseOf(provider);
+
+  if (provider.kind === 'pollinations') {
+    const [width, height] = POLLINATIONS_SIZE[aspect];
+    const seed = Math.floor(Math.random() * 1_000_000);
+    const url = `${base}/${encodeURIComponent(fullPrompt)}?width=${width}&height=${height}&seed=${seed}&nologo=true&model=${encodeURIComponent(provider.model.trim() || 'flux')}`;
+    const response = await fetch(url);
+    if (!response.ok) throw await failure(response, 'Pollinations');
+    const blob = await response.blob();
+    if (!blob.type.startsWith('image/')) throw new Error('Pollinations رجع بلا صورة');
+    return blob;
+  }
 
   if (provider.kind === 'google') {
     const url = `${base}/v1beta/models/${encodeURIComponent(provider.model.trim())}:predict`;
@@ -229,6 +253,15 @@ export async function generateSceneImage(provider: Provider, prompt: string, asp
 export async function testProvider(provider: Provider): Promise<string> {
   if (provider.kind === 'local') return 'المزوّد المحلي لا يحتاج مفتاحًا.';
   const base = baseOf(provider);
+  if (provider.kind === 'pollinations') {
+    const url = `${base}/${encodeURIComponent('a small test photo of a tea glass')}?width=256&height=256&seed=1&nologo=true`;
+    const response = await fetch(url);
+    if (response.status === 402 || response.status === 429)
+      return 'الخدمة تعمل، لكن الحد المجاني مشغول الآن — انتظر 45 ثانية وأعد المحاولة.';
+    if (!response.ok) throw await failure(response, 'Pollinations');
+    const type = response.headers.get('content-type') ?? '';
+    return type.startsWith('image/') ? 'الخدمة تعمل بلا مفتاح.' : 'رد غير متوقع من Pollinations.';
+  }
   if (provider.kind === 'google') {
     const response = await fetch(`${base}/v1beta/models`, { headers: authHeaders(provider) });
     if (!response.ok) throw await failure(response, 'Google');

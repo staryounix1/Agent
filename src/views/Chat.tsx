@@ -184,6 +184,9 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
           let mime = 'image/svg+xml';
           let name = `${scene.id}.svg`;
           if (useProvider) {
+            if (imageProvider.kind === 'pollinations' && index > 0) {
+              await new Promise((resolve) => setTimeout(resolve, 46_000));
+            }
             try {
               blob = await generateSceneImage(imageProvider, scene.visual || scene.text, draft.aspect);
               mime = blob.type || 'image/png';
