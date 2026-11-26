@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1350" viewBox="0 0 1080 1350">
+<defs>
+<linearGradient id="sand" x1="0" y1="0" x2=".4" y2="1"><stop offset="0" stop-color="#f0c68b"/><stop offset=".5" stop-color="#c98a4e"/><stop offset="1" stop-color="#5d3618"/></linearGradient>
+<linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b2a1c"/><stop offset="1" stop-color="#c98a4e"/></linearGradient>
+<filter id="grain"><feTurbulence type="fractalNoise" baseFrequency="0.75" numOctaves="4"/><feColorMatrix type="saturate" values="0"/><feComponentTransfer><feFuncA type="linear" slope="0.08"/></feComponentTransfer></filter>
+</defs>
+<rect width="1080" height="1350" fill="url(#sky)"/>
+<circle cx="760" cy="330" r="120" fill="#ffe6bd" opacity=".9"/>
+<path d="M0 720 Q 300 600 620 720 T 1080 660 L1080 1350 L0 1350 Z" fill="#b7753c"/>
+<path d="M0 860 Q 360 740 700 860 T 1080 820 L1080 1350 L0 1350 Z" fill="#8f5227"/>
+<path d="M0 1010 Q 320 900 660 1010 T 1080 970 L1080 1350 L0 1350 Z" fill="#5d3618"/>
+<path d="M0 1160 Q 400 1080 720 1170 T 1080 1130 L1080 1350 L0 1350 Z" fill="#2e1a0c"/>
+<rect width="1080" height="1350" filter="url(#grain)" opacity=".55"/>
+</svg>
