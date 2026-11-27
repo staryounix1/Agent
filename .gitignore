@@ -12,3 +12,7 @@ android/local.properties
 *.keystore
 .DS_Store
 *.log
+
+android/keystore.properties
+test-results/
+playwright-report/

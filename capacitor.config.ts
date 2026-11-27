@@ -8,6 +8,10 @@ const config: CapacitorConfig = {
   android: {
     backgroundColor: '#0d0c0b',
   },
+  plugins: {
+    // صوت Google المجاني يمر من التطبيق مباشرة، فنتجاوز قيد CORS عبر أداة Capacitor الأصلية.
+    CapacitorHttp: { enabled: true },
+  },
 };
 
 export default config;

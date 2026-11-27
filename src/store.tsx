@@ -1,10 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { AppState, Aspect, Lang, Project, Scene, Series, Stage, Template } from './types';
+import type { AppState, Aspect, ExportRecord, Lang, Project, Scene, Series, Stage, Template } from './types';
 import { STAGES } from './types';
-import { loadState, saveState, newId, putAsset } from './lib/storage';
+import { loadState, saveState, newId, putAsset, deleteAssets, allAssets } from './lib/storage';
+import { assetIdsOfProject, exportsToDrop, orphanAssetIds } from './lib/assets';
 import { audioSeconds } from './lib/audio';
 import { probeVideo } from './lib/visuals';
 import { buildMeta, generateScenes } from './lib/script';
+import { exportBackup, importBackup } from './lib/backup';
 import { track } from './lib/analytics';
 
 export interface NewProjectInput {
@@ -26,6 +28,10 @@ interface StoreApi {
   selectProject: (id: string | null) => void;
   deleteProject: (id: string) => void;
   deleteSeries: (id: string) => void;
+  addExport: (projectId: string, record: ExportRecord) => void;
+  cleanupStorage: () => Promise<number>;
+  exportBackupFile: () => Promise<{ blob: Blob; skipped: number }>;
+  importBackupFile: (file: File) => Promise<{ projects: number; assets: number; skipped: number }>;
   setStage: (id: string, stage: Stage) => void;
   saveSceneImage: (projectId: string, sceneId: string, file: Blob, name: string) => Promise<void>;
   saveSceneVideo: (projectId: string, sceneId: string, file: Blob, name: string, fromGrok?: boolean) => Promise<void>;
@@ -50,6 +56,10 @@ function withUpdate(project: Project): Project {
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState>(() => loadState());
+  const stateRef = useRef<AppState>(state);
+  stateRef.current = state;
+  const stateProjectsRef = useRef<Project[]>(state.projects);
+  stateProjectsRef.current = state.projects;
   const timer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -115,6 +125,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const deleteProject = useCallback((id: string) => {
+    const target = stateProjectsRef.current.find((p) => p.id === id);
+    if (target) void deleteAssets(assetIdsOfProject(target));
     setState((prev) => ({
       ...prev,
       projects: prev.projects.filter((p) => p.id !== id),
@@ -123,7 +135,53 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const deleteSeries = useCallback((id: string) => {
-    setState((prev) => ({ ...prev, series: prev.series.filter((s) => s.id !== id) }));
+    for (const project of stateProjectsRef.current.filter((p) => p.seriesId === id))
+      void deleteAssets(assetIdsOfProject(project));
+    setState((prev) => ({
+      ...prev,
+      series: prev.series.filter((s) => s.id !== id),
+      projects: prev.projects.filter((p) => p.seriesId !== id),
+      selectedId: prev.projects.find((p) => p.id === prev.selectedId)?.seriesId === id ? null : prev.selectedId,
+    }));
+  }, []);
+
+  /** يسجّل فيديو مصدرًا ويحذف الأقدم فوق السقف حتى لا تتراكم الميجابايتات. */
+  const addExport = useCallback((projectId: string, record: ExportRecord) => {
+    let dropped: string[] = [];
+    updateProject(projectId, (project) => {
+      const next: Project = {
+        ...project,
+        exportCount: project.exportCount + 1,
+        exports: [...(project.exports ?? []), record],
+      };
+      dropped = exportsToDrop(next);
+      return { ...next, exports: (next.exports ?? []).filter((item) => !dropped.includes(item.id)) };
+    });
+    if (dropped.length) void deleteAssets(dropped);
+  }, [updateProject]);
+
+  /** يمسح كل أصل لا يستعمله أي مشروع (بعد تنزيل الفيديو أو حذف مشاريع). */
+  const cleanupStorage = useCallback(async (): Promise<number> => {
+    const assets = await allAssets().catch(() => []);
+    const orphans = orphanAssetIds(assets, stateProjectsRef.current);
+    return deleteAssets(orphans);
+  }, []);
+
+  const exportBackupFile = useCallback(async () => {
+    const { blob, skipped } = await exportBackup({
+      version: 1,
+      series: stateRef.current.series,
+      projects: stateRef.current.projects,
+      selectedId: null,
+    });
+    return { blob, skipped };
+  }, []);
+
+  const importBackupFile = useCallback(async (file: File) => {
+    const raw = await file.text();
+    const result = await importBackup(raw, stateRef.current);
+    setState(result.state);
+    return { projects: result.projects, assets: result.assets, skipped: result.skipped };
   }, []);
 
   const setStage = useCallback((id: string, stage: Stage) => {
@@ -273,13 +331,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     selectProject,
     deleteProject,
     deleteSeries,
+    addExport,
+    cleanupStorage,
+    exportBackupFile,
+    importBackupFile,
     setStage,
     saveSceneImage,
     saveSceneVideo,
     saveSceneAudio,
     saveMusic,
     duplicateProject,
-  }), [state, project, updateProject, createSeries, createProject, selectProject, deleteProject, deleteSeries, setStage, saveSceneImage, saveSceneVideo, saveSceneAudio, saveMusic, duplicateProject]);
+  }), [state, project, updateProject, createSeries, createProject, selectProject, deleteProject, deleteSeries, addExport, cleanupStorage, exportBackupFile, importBackupFile, setStage, saveSceneImage, saveSceneVideo, saveSceneAudio, saveMusic, duplicateProject]);
 
   return <StoreContext.Provider value={api}>{children}</StoreContext.Provider>;
 }

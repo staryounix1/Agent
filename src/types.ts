@@ -44,6 +44,16 @@ export interface Project {
   createdAt: number;
   updatedAt: number;
   exportCount: number;
+  /** الفيديوهات المصدرة المحفوظة على الجهاز (سقفها MAX_EXPORTS). */
+  exports?: ExportRecord[];
+}
+
+export interface ExportRecord {
+  id: string;
+  name: string;
+  bytes: number;
+  duration: number;
+  createdAt: number;
 }
 
 export interface Series {

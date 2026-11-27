@@ -1,6 +1,11 @@
 import type { Aspect, Lang, Scene, Template } from '../types';
 import { estimateSeconds } from './timeline';
 import type { Provider } from './providers';
+import { apiBase } from './tts';
+
+function isNativeApp(): boolean {
+  return typeof window !== 'undefined' && /^(capacitor|ionic|file):$/.test(window.location.protocol);
+}
 
 export interface ScriptInput {
   idea: string;
@@ -107,9 +112,28 @@ async function failure(response: Response, label: string): Promise<Error> {
   return new Error(`${label} رفض الطلب (HTTP ${response.status})${detail ? `: ${detail}` : ''}`);
 }
 
+/** سقف زمني لكل طلب حتى لا يتوقف زر الإرسال بلا نهاية. */
+const TIMEOUT_MS = 30_000;
+
+async function fetchWithTimeout(url: string, init: RequestInit, ms = TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError')
+      throw new Error(`المزوّد ما جاوبش في ${Math.round(ms / 1000)} ثانية — جرّب مرة أخرى.`);
+    if (error instanceof TypeError)
+      throw new Error('تعذّر الوصول للمزوّد: تحقق من الإنترنت أو استعمل المزوّد المحلي.');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function googleText(provider: Provider, prompt: string): Promise<string> {
   const url = `${baseOf(provider)}/v1beta/models/${encodeURIComponent(provider.model.trim())}:generateContent`;
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
     body: JSON.stringify({
@@ -127,12 +151,13 @@ async function googleText(provider: Provider, prompt: string): Promise<string> {
 }
 
 async function openAIText(provider: Provider, prompt: string): Promise<string> {
-  const url = `${baseOf(provider)}/chat/completions`;
-  const response = await fetch(url, {
+  const free = provider.kind === 'pollinations-text';
+  const url = free ? `${baseOf(provider)}/openai` : `${baseOf(provider)}/chat/completions`;
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
+    headers: { 'Content-Type': 'application/json', ...(free ? {} : authHeaders(provider)) },
     body: JSON.stringify({
-      model: provider.model.trim(),
+      model: provider.model.trim() || 'openai-fast',
       temperature: 0.9,
       messages: [
         { role: 'system', content: 'أعد JSON صالحًا فقط دون أي شرح.' },
@@ -140,7 +165,16 @@ async function openAIText(provider: Provider, prompt: string): Promise<string> {
       ],
     }),
   });
-  if (!response.ok) throw await failure(response, provider.label);
+  if (!response.ok) {
+    if (free) {
+      const detail = await response.text().catch(() => '');
+      const wait = Number(response.headers.get('retry-after')) || Number(detail.match(/Retry after (\d+)/i)?.[1]) || 0;
+      throw new Error(
+        `الحد المجاني: رد واحد كل 45 ثانية${wait ? ` — عاود بعد ${wait} ثانية` : ''}. تقدر تزيد مفتاحًا من enter.pollinations.ai بلا انتظار.`,
+      );
+    }
+    throw await failure(response, provider.label);
+  }
   const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
   const text = data.choices?.[0]?.message?.content ?? '';
   if (!text.trim()) throw new Error('المزوّد رجع ردًّا فارغًا');
@@ -148,7 +182,13 @@ async function openAIText(provider: Provider, prompt: string): Promise<string> {
 }
 
 export function textSupported(provider: Provider): boolean {
-  return provider.kind === 'google' || provider.kind === 'openai' || provider.kind === 'xai' || provider.kind === 'custom';
+  return (
+    provider.kind === 'google' ||
+    provider.kind === 'openai' ||
+    provider.kind === 'xai' ||
+    provider.kind === 'pollinations-text' ||
+    provider.kind === 'custom'
+  );
 }
 
 export async function generateScript(provider: Provider, input: ScriptInput): Promise<Scene[]> {
@@ -203,7 +243,7 @@ export async function generateSceneImage(provider: Provider, prompt: string, asp
     const [width, height] = POLLINATIONS_SIZE[aspect];
     const seed = Math.floor(Math.random() * 1_000_000);
     const url = `${base}/${encodeURIComponent(fullPrompt)}?width=${width}&height=${height}&seed=${seed}&nologo=true&model=${encodeURIComponent(provider.model.trim() || 'flux')}`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url, {}, 90_000);
     if (!response.ok) throw await failure(response, 'Pollinations');
     const blob = await response.blob();
     if (!blob.type.startsWith('image/')) throw new Error('Pollinations رجع بلا صورة');
@@ -212,14 +252,18 @@ export async function generateSceneImage(provider: Provider, prompt: string, asp
 
   if (provider.kind === 'google') {
     const url = `${base}/v1beta/models/${encodeURIComponent(provider.model.trim())}:predict`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
-      body: JSON.stringify({
-        instances: [{ prompt: fullPrompt }],
-        parameters: { sampleCount: 1, aspectRatio: aspect },
-      }),
-    });
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
+        body: JSON.stringify({
+          instances: [{ prompt: fullPrompt }],
+          parameters: { sampleCount: 1, aspectRatio: aspect },
+        }),
+      },
+      120_000,
+    );
     if (!response.ok) throw await failure(response, 'Google Imagen');
     const data = (await response.json()) as { predictions?: { bytesBase64Encoded?: string; mimeType?: string }[] };
     const first = data.predictions?.[0];
@@ -227,17 +271,21 @@ export async function generateSceneImage(provider: Provider, prompt: string, asp
     return base64ToBlob(first.bytesBase64Encoded, first.mimeType ?? 'image/png');
   }
 
-  const response = await fetch(`${base}/images/generations`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
-    body: JSON.stringify({
-      model: provider.model.trim(),
-      prompt: fullPrompt,
-      n: 1,
-      size: IMAGE_SIZE[aspect],
-      response_format: 'b64_json',
-    }),
-  });
+  const response = await fetchWithTimeout(
+    `${base}/images/generations`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
+      body: JSON.stringify({
+        model: provider.model.trim(),
+        prompt: fullPrompt,
+        n: 1,
+        size: IMAGE_SIZE[aspect],
+        response_format: 'b64_json',
+      }),
+    },
+    120_000,
+  );
   if (!response.ok) throw await failure(response, provider.label);
   const data = (await response.json()) as { data?: { b64_json?: string; url?: string }[] };
   const first = data.data?.[0];
@@ -262,20 +310,40 @@ export async function testProvider(provider: Provider): Promise<string> {
     const type = response.headers.get('content-type') ?? '';
     return type.startsWith('image/') ? 'الخدمة تعمل بلا مفتاح.' : 'رد غير متوقع من Pollinations.';
   }
+  if (provider.kind === 'pollinations-text') {
+    const response = await fetchWithTimeout(`${base}/models`, {}, 20_000);
+    if (!response.ok) throw await failure(response, 'Pollinations نص');
+    const models = (await response.json().catch(() => null)) as { name?: string }[] | null;
+    const model = provider.model.trim() || 'openai-fast';
+    const found = Array.isArray(models) ? models.some((item) => (item.name ?? '').includes(model.replace('openai-', ''))) : true;
+    return found
+      ? 'المزوّد متصل بلا مفتاح. الحد المجاني: سكريبت واحد كل 45 ثانية.'
+      : 'المتصل يعمل، لكن هذا الموديل غير مدرج — جرّب openai-fast.';
+  }
   if (provider.kind === 'google') {
-    const response = await fetch(`${base}/v1beta/models`, { headers: authHeaders(provider) });
+    const response = await fetchWithTimeout(`${base}/v1beta/models`, { headers: authHeaders(provider) }, 30_000);
     if (!response.ok) throw await failure(response, 'Google');
     const data = (await response.json()) as { models?: { name?: string }[] };
     const model = provider.model.trim();
     const found = (data.models ?? []).some((item) => (item.name ?? '').includes(model));
     return found ? `المفتاح صالح و${model} متاح.` : 'المفتاح صالح، لكن الموديل غير ظاهر في القائمة.';
   }
+  if (provider.kind === 'free-voice') {
+    if (isNativeApp()) {
+      const { synthesizeSpeech } = await import('./tts');
+      await synthesizeSpeech(provider, 'مرحبا', 'ar');
+      return 'الصوت المجاني يعمل داخل التطبيق بلا مفتاح.';
+    }
+    const response = await fetchWithTimeout(`${apiBase()}/api/tts?ping=1`, {}, 20_000);
+    if (!response.ok) throw await failure(response, 'الصوت المجاني');
+    return 'الصوت المجاني يعمل بلا مفتاح — أصوات Google.';
+  }
   if (provider.kind === 'elevenlabs') {
-    const response = await fetch(`${base}/user`, { headers: authHeaders(provider) });
+    const response = await fetchWithTimeout(`${base}/user`, { headers: authHeaders(provider) }, 30_000);
     if (!response.ok) throw await failure(response, 'ElevenLabs');
     return 'المفتاح صالح.';
   }
-  const response = await fetch(`${base}/models`, { headers: authHeaders(provider) });
+  const response = await fetchWithTimeout(`${base}/models`, { headers: authHeaders(provider) }, 30_000);
   if (!response.ok) throw await failure(response, provider.label);
   return 'المفتاح صالح والرابط يجيب.';
 }

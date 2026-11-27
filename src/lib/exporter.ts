@@ -1,7 +1,7 @@
 import { ASPECTS, type Project } from '../types';
 import { ambientBuffer, audioContext, decodeBlob } from './audio';
 import { ensureCaptionFonts, frameOptionsFor, type VisualFrame } from './render';
-import { buildSrt, buildTimeline, sceneAt, type Timeline } from './timeline';
+import { buildSrt, buildTimeline, sceneAt, audioSchedule, type Timeline } from './timeline';
 import { drawFrame } from './render';
 
 export interface VideoFormat {
@@ -10,6 +10,9 @@ export interface VideoFormat {
   isMp4: boolean;
   label: string;
 }
+
+/** مهلة واحدة للصورة والصوت حتى يبدآن معًا. */
+export const LEAD_SECONDS = 0.12;
 
 const CANDIDATES: VideoFormat[] = [
   { mime: 'video/mp4;codecs=avc1.42E01E,mp4a.40.2', ext: 'mp4', isMp4: true, label: 'MP4 / H.264' },
@@ -82,6 +85,10 @@ export interface ExportResult {
   format: VideoFormat;
   duration: number;
   filename: string;
+  /** هل الفيديو فيه صوت مسموع فعلًا. */
+  hasAudio: boolean;
+  /** سبب غياب الصوت، إن غاب. */
+  mutedReason?: string;
 }
 
 export async function exportVideo(input: ExportInput): Promise<ExportResult> {
@@ -105,39 +112,87 @@ export async function exportVideo(input: ExportInput): Promise<ExportResult> {
   drawFrame(ctx, timeline, 0, opts);
 
   const videoStream = canvas.captureStream(30);
+  const sources: AudioBufferSourceNode[] = [];
   let audioStream: MediaStream | null = null;
   let actx: AudioContext | null = null;
-  const sources: AudioBufferSourceNode[] = [];
+  let destination: MediaStreamAudioDestinationNode | null = null;
+  let musicBuffer: AudioBuffer | null = null;
+  const narration: { sceneId: string; buffer: AudioBuffer }[] = [];
+  let mutedReason: string | undefined;
 
+  // أولًا: نفك ترميز كل الملفات قبل بدء التسجيل حتى يبدأ الصوت مع الصورة لا بعدها.
   try {
     actx = audioContext();
     if (actx.state === 'suspended') await actx.resume();
-    const destination = actx.createMediaStreamDestination();
-    const startAt = actx.currentTime + 0.12;
+    destination = actx.createMediaStreamDestination();
+  } catch {
+    mutedReason = 'تعذّر تشغيل محرّك الصوت في هذا المتصفح، فخرج الفيديو صامتًا.';
+  }
 
+  if (destination) {
+    let failed = 0;
     for (const timed of timeline.scenes) {
       const blob = audioBlobs[timed.scene.id];
       if (!blob) continue;
       try {
-        const buffer = await decodeBlob(blob);
+        narration.push({ sceneId: timed.scene.id, buffer: await decodeBlob(blob) });
+      } catch {
+        failed += 1;
+      }
+    }
+    if (failed && !narration.length) mutedReason = 'ملفات التعليق الصوتي غير مقروءة، فخرج الفيديو بلا تعليق.';
+    else if (failed) mutedReason = `${failed} مقطع صوتي ما تفكّش ترميزه، وباقي التعليق موجود.`;
+
+    if (project.music.source !== 'none') {
+      try {
+        musicBuffer = musicBlob ? await decodeBlob(musicBlob) : await ambientBuffer();
+      } catch {
+        /* الموسيقى اختيارية */
+      }
+    }
+    if (!narration.length && !musicBuffer && !input.includeVideoAudio)
+      mutedReason = 'ما فيهاش تعليق صوتي جاهز، فالفيديو صامت.';
+  }
+
+  // المسار الصوتي يدخل الستريم قبل بدء التسجيل: كروم يرفض إضافة مسارات أثناء التسجيل
+  // («Tracks in MediaStream were added») ويخرج الملف فارغًا.
+  const tracks = [...videoStream.getVideoTracks()];
+  if (destination) tracks.push(...destination.stream.getAudioTracks());
+  const stream = new MediaStream(tracks);
+  const recorder = new MediaRecorder(stream, { mimeType: format.mime, videoBitsPerSecond: 6_000_000 });
+  const chunks: BlobPart[] = [];
+  recorder.ondataavailable = (event) => {
+    if (event.data.size) chunks.push(event.data);
+  };
+  let recorderError: string | null = null;
+  recorder.onerror = (event) => {
+    const error = (event as Event & { error?: DOMException }).error;
+    recorderError = error?.message || 'خطأ غير معروف في المسجّل';
+  };
+
+  const scheduleAudio = () => {
+    if (!actx || !destination) return;
+    const startAt = actx.currentTime + LEAD_SECONDS;
+    for (const slot of audioSchedule(timeline, startAt)) {
+      const item = narration.find((entry) => entry.sceneId === slot.sceneId);
+      if (!item) continue;
+      try {
         const source = actx.createBufferSource();
-        source.buffer = buffer;
+        source.buffer = item.buffer;
         const gain = actx.createGain();
         gain.gain.value = 1;
         source.connect(gain);
         gain.connect(destination);
-        source.start(startAt + timed.start);
+        source.start(slot.at);
         sources.push(source);
       } catch {
-        /* ملف صوتي غير مقروء: نكمل بدونه */
+        /* مصدر واحد فشل: نكمل بالباقي */
       }
     }
-
-    if (project.music.source !== 'none') {
+    if (musicBuffer) {
       try {
-        const buffer = musicBlob ? await decodeBlob(musicBlob) : await ambientBuffer();
         const music = actx.createBufferSource();
-        music.buffer = buffer;
+        music.buffer = musicBuffer;
         music.loop = true;
         const gain = actx.createGain();
         gain.gain.value = Math.min(1, Math.max(0, project.music.volume)) * 0.55;
@@ -166,20 +221,7 @@ export async function exportVideo(input: ExportInput): Promise<ExportResult> {
         }
       }
     }
-    if (destination.stream.getAudioTracks().length) audioStream = destination.stream;
-  } catch {
-    audioStream = null;
-  }
-
-  const tracks = [
-    ...videoStream.getVideoTracks(),
-    ...(audioStream ? audioStream.getAudioTracks() : []),
-  ];
-  const stream = new MediaStream(tracks);
-  const recorder = new MediaRecorder(stream, { mimeType: format.mime, videoBitsPerSecond: 6_000_000 });
-  const chunks: BlobPart[] = [];
-  recorder.ondataavailable = (event) => {
-    if (event.data.size) chunks.push(event.data);
+    if (sources.length) audioStream = destination.stream;
   };
 
   const cleanup = () => {
@@ -196,14 +238,20 @@ export async function exportVideo(input: ExportInput): Promise<ExportResult> {
 
   return new Promise<ExportResult>((resolve, reject) => {
     let raf = 0;
-    const startedAt = performance.now() + 120;
+    let startedAt = 0;
 
     recorder.onstop = () => {
       cancelAnimationFrame(raf);
       cleanup();
       const blob = new Blob(chunks, { type: format.mime });
       if (!blob.size) {
-        reject(new Error('خرج التسجيل فارغًا، أعد المحاولة.'));
+        reject(
+          new Error(
+            recorderError
+              ? `توقّف التسجيل: ${recorderError}`
+              : 'خرج التسجيل فارغًا، أعد المحاولة.',
+          ),
+        );
         return;
       }
       resolve({
@@ -211,6 +259,8 @@ export async function exportVideo(input: ExportInput): Promise<ExportResult> {
         format,
         duration: timeline.duration,
         filename: `${slugify(project.title)}.${format.ext}`,
+        hasAudio: Boolean(audioStream),
+        mutedReason: audioStream ? undefined : mutedReason,
       });
     };
 
@@ -230,6 +280,9 @@ export async function exportVideo(input: ExportInput): Promise<ExportResult> {
 
     try {
       recorder.start(500);
+      scheduleAudio();
+      // نفس مهلة الصوت تُطبَّق على الصورة، فلا يتقدّم الصوت عن الصورة ولا يتأخر.
+      startedAt = performance.now() + LEAD_SECONDS * 1000;
       raf = requestAnimationFrame(tick);
     } catch (err) {
       cleanup();

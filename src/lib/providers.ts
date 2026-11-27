@@ -1,6 +1,15 @@
 export type StageId = 'text' | 'image' | 'voice' | 'video';
 
-export type ProviderKind = 'local' | 'google' | 'openai' | 'xai' | 'elevenlabs' | 'pollinations' | 'custom';
+export type ProviderKind =
+  | 'local'
+  | 'google'
+  | 'openai'
+  | 'xai'
+  | 'elevenlabs'
+  | 'pollinations'
+  | 'pollinations-text'
+  | 'free-voice'
+  | 'custom';
 
 export interface Provider {
   id: string;
@@ -31,7 +40,9 @@ export const KINDS: { id: ProviderKind; label: string; baseUrl: string; model: s
   { id: 'openai', label: 'متوافق مع OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
   { id: 'xai', label: 'xAI (Grok)', baseUrl: 'https://api.x.ai/v1', model: 'grok-4' },
   { id: 'elevenlabs', label: 'ElevenLabs', baseUrl: 'https://api.elevenlabs.io/v1', model: 'eleven_multilingual_v2' },
-  { id: 'pollinations', label: 'Pollinations (مجاني بلا مفتاح)', baseUrl: 'https://image.pollinations.ai/prompt', model: 'flux' },
+  { id: 'pollinations', label: 'Pollinations صور · مجاني', baseUrl: 'https://image.pollinations.ai/prompt', model: 'flux' },
+  { id: 'pollinations-text', label: 'Pollinations نص · مجاني', baseUrl: 'https://text.pollinations.ai', model: 'openai-fast' },
+  { id: 'free-voice', label: 'Google صوت · مجاني بلا مفتاح', baseUrl: '', model: '' },
   { id: 'custom', label: 'مزوّد آخر (رابط يدوي)', baseUrl: '', model: '' },
 ];
 
@@ -44,18 +55,34 @@ function localProvider(stage: StageId, label: string): Provider {
 export function defaultSettings(): ProviderSettings {
   const providers: Provider[] = [
     localProvider('text', 'قوالب مدمجة'),
+    { id: 'pollinations-text', label: 'Pollinations نص · مجاني', stage: 'text', kind: 'pollinations-text', baseUrl: 'https://text.pollinations.ai', model: 'openai-fast', key: '', builtin: true },
     { id: 'google-text', label: 'Google AI Studio', stage: 'text', kind: 'google', baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-flash', key: '', builtin: true },
     localProvider('image', 'بطاقات مولّدة محليًا'),
     { id: 'google-image', label: 'Google Imagen', stage: 'image', kind: 'google', baseUrl: 'https://generativelanguage.googleapis.com', model: 'imagen-3.0-generate-002', key: '', builtin: true },
-    { id: 'pollinations-image', label: 'Pollinations (مجاني بلا مفتاح)', stage: 'image', kind: 'pollinations', baseUrl: 'https://image.pollinations.ai/prompt', model: 'flux', key: '', builtin: true },
+    { id: 'pollinations-image', label: 'Pollinations صور · مجاني', stage: 'image', kind: 'pollinations', baseUrl: 'https://image.pollinations.ai/prompt', model: 'flux', key: '', builtin: true },
     localProvider('voice', 'تسجيل من الجهاز'),
+    { id: 'free-voice', label: 'Google صوت · مجاني', stage: 'voice', kind: 'free-voice', baseUrl: '', model: '', key: '', builtin: true },
     { id: 'eleven-voice', label: 'ElevenLabs', stage: 'voice', kind: 'elevenlabs', baseUrl: 'https://api.elevenlabs.io/v1', model: 'eleven_multilingual_v2', key: '', builtin: true },
     localProvider('video', 'تركيب داخل المتصفح'),
     { id: 'xai-video', label: 'xAI Grok', stage: 'video', kind: 'xai', baseUrl: 'https://api.x.ai/v1', model: 'grok-video', key: '', builtin: true },
   ];
   return {
     providers,
-    active: { text: 'local-text', image: 'local-image', voice: 'local-voice', video: 'local-video' },
+    active: { text: 'pollinations-text', image: 'local-image', voice: 'free-voice', video: 'local-video' },
+  };
+}
+
+/** يفعّل كل ما يعمل بلا مفتاح: نص وصور من Pollinations، والتسجيل والتركيب داخل الجهاز. */
+export function freeSettings(settings: ProviderSettings = loadSettings()): ProviderSettings {
+  return {
+    ...settings,
+    active: {
+      ...settings.active,
+      text: 'pollinations-text',
+      image: 'pollinations-image',
+      voice: 'free-voice',
+      video: 'local-video',
+    },
   };
 }
 
@@ -66,11 +93,19 @@ export function loadSettings(): ProviderSettings {
     const saved = JSON.parse(raw) as Partial<ProviderSettings>;
     const base = defaultSettings();
     const kept = Array.isArray(saved.providers) && saved.providers.length > 0 ? saved.providers : base.providers;
-    const missing = base.providers.filter(
-      (item) => item.builtin && !kept.some((savedItem) => savedItem.id === item.id),
+    // الصوت المجاني القديم (Pollinations openai-audio) أُوقف من المزوّد: نحوّله إلى صوت Google المجاني.
+    const migrated = kept.map((item) =>
+      (item.kind as string) === 'pollinations-audio' || item.id === 'pollinations-voice'
+        ? { ...item, id: 'free-voice', label: 'Google صوت · مجاني', kind: 'free-voice' as const, baseUrl: '', model: '', key: '' }
+        : item,
     );
-    const providers = [...kept, ...missing];
+    const unique = migrated.filter((item, index) => migrated.findIndex((other) => other.id === item.id) === index);
+    const missing = base.providers.filter(
+      (item) => item.builtin && !unique.some((savedItem) => savedItem.id === item.id),
+    );
+    const providers = [...unique, ...missing];
     const active = { ...base.active, ...(saved.active ?? {}) };
+    if (active.voice === 'pollinations-voice') active.voice = 'free-voice';
     return { providers, active };
   } catch {
     return defaultSettings();
@@ -97,9 +132,21 @@ export function activeProvider(stage: StageId, settings = loadSettings()): Provi
 
 export function isReady(provider: Provider): boolean {
   if (provider.kind === 'local') return true;
-  if (provider.kind === 'pollinations') return Boolean(provider.baseUrl.trim());
+  if (provider.kind === 'free-voice') return true;
+  if (provider.kind === 'pollinations' || provider.kind === 'pollinations-text')
+    return Boolean(provider.baseUrl.trim());
   if (!provider.key.trim()) return false;
   return Boolean(provider.baseUrl.trim()) && Boolean(provider.model.trim());
+}
+
+/** مزوّد بلا مفتاح ولا تسجيل: يعمل مباشرة بعد التثبيت. */
+export function isFree(provider: Provider): boolean {
+  return (
+    provider.kind === 'local' ||
+    provider.kind === 'pollinations' ||
+    provider.kind === 'pollinations-text' ||
+    provider.kind === 'free-voice'
+  );
 }
 
 export function newProvider(stage: StageId, kind: ProviderKind): Provider {

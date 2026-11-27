@@ -4,7 +4,7 @@ import { Button, Icon, Progress, useToast } from '../ui';
 import type { Project, PublishMeta, Scene, Template, View } from '../types';
 import { buildMeta, clampIdea, generateScenes, publishText } from '../lib/script';
 import { estimateSeconds, formatClock } from '../lib/timeline';
-import { assetImage, assetUrl, getAsset, newId, putAsset } from '../lib/storage';
+import { assetImage, assetUrl, deleteAssets, getAsset, newId, putAsset, storageUsage } from '../lib/storage';
 import { copyText } from '../lib/clipboard';
 import { dimensionsFor, downloadBlob, exportVideo, pickVideoFormat, slugify } from '../lib/exporter';
 import { sceneCardBlob } from '../lib/cards';
@@ -13,8 +13,34 @@ import { type ChatStep, TEMPLATE_LABEL, ideasFor, inferTemplate, parseCommand, p
 import { track } from '../lib/analytics';
 import { activeProvider, isReady } from '../lib/providers';
 import { generateSceneImage, generateScript, imageSupported, textSupported } from '../lib/ai';
+import { formatBytes, referencedAssetIds } from '../lib/assets';
+import { overallRatio, stageLabel, type StageProgress } from '../lib/progress';
+import { retryAfterFromMessage, sleep } from '../lib/ratelimit';
+import { speechSupported, synthesizeSpeech } from '../lib/tts';
+import { keepAwake, watchVisibility } from '../lib/wakelock';
+import { audioSeconds as blobSeconds } from '../lib/audio';
 
 const CHAT_KEY = 'mashhad.chat.v1';
+
+/**
+ * ينفّذ النداء، وإن ردّ المزوّد بحدّ مجاني (402/429 مع Retry after) ينتظر المدة التي طلبها
+ * بالضبط ويعيد المحاولة مرة واحدة — بدل نوم ثابت يجمّد الشاشة.
+ */
+async function withRetryAfter<T>(run: () => Promise<T>, onWait?: (ms: number) => void, attempts = 2): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      lastError = error;
+      const hint = error instanceof Error ? retryAfterFromMessage(error.message) : null;
+      if (hint === null || attempt === attempts - 1) throw error;
+      onWait?.(hint);
+      await sleep(hint);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('تعذّر الطلب');
+}
 
 interface Message {
   id: string;
@@ -50,7 +76,7 @@ function welcome(): Message {
     id: newId('ms'),
     role: 'ai',
     text:
-      'سلام! أنا مساعد مشهد. غادي نصاوبو معاك فيديو كامل: نختارو النوع، نلقاو فكرة، نكتبو السكريبت، ومن بعد نصدرّو ليك MP4 بالترجمة والموسيقى. غادي يكون عمودي 9:16 بالعربية. شنو نوع الفيديو؟',
+      'سلام! أنا مساعد مشهد. السكريبت كيتكتب ليك بالذكاء الاصطناعي مجانًا وبلا أي مفتاح، ومن بعد كتصدر فيديو كامل MP4 بالترجمة والموسيقى. نختارو النوع، نلقاو فكرة، نكتبو السكريبت، ونصدّرو. غادي يكون عمودي 9:16 بالعربية. شنو نوع الفيديو؟',
     chips: ['قصة', 'نصائح', 'خطوات', 'منتج'],
   };
 }
@@ -66,7 +92,7 @@ function scriptMessage(text: string): Message {
 }
 
 export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
-  const { state, createProject, updateProject, createSeries, selectProject, setStage } = useStore();
+  const { state, createProject, updateProject, createSeries, selectProject, setStage, addExport, cleanupStorage } = useStore();
   const toast = useToast();
 
   const [step, setStep] = useState<ChatStep>('template');
@@ -78,6 +104,7 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
   const [busy, setBusy] = useState(false);
   const [ratio, setRatio] = useState(0);
   const [progressSeconds, setProgressSeconds] = useState(0);
+  const [stageProgress, setStageProgress] = useState<StageProgress>({ stage: 'images', done: 0, total: 1 });
   const [projectId, setProjectId] = useState<string | null>(null);
   const [video, setVideo] = useState<{ url: string; name: string; assetId: string } | null>(null);
   const [meta, setMeta] = useState<PublishMeta | null>(null);
@@ -161,34 +188,62 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
       setRatio(0);
       setProgressSeconds(0);
 
+      let releaseWake: (() => void) | null = null;
+      let stopWatch: (() => void) | null = null;
       try {
         const series = state.series[0] ?? createSeries('سلسلة المساعد');
-        const project = createProject({
-          title: draft.idea,
-          idea: draft.idea,
-          seriesId: series.id,
-          lang: draft.lang,
-          aspect: draft.aspect,
-          template: draft.template,
-          targetSeconds: draft.seconds,
-        });
+        // إعادة المحاولة تستعمل نفس المشروع بدل إنشاء مشروع مكرر في كل ضغطة.
+        const existing = projectId ? state.projects.find((item) => item.id === projectId) : undefined;
+        const project =
+          existing ??
+          createProject({
+            title: draft.idea,
+            idea: draft.idea,
+            seriesId: series.id,
+            lang: draft.lang,
+            aspect: draft.aspect,
+            template: draft.template,
+            targetSeconds: draft.seconds,
+          });
+        if (existing) {
+          updateProject(existing.id, (current) => ({
+            ...current,
+            title: draft.idea,
+            idea: draft.idea,
+            lang: draft.lang,
+            aspect: draft.aspect,
+            template: draft.template,
+            targetSeconds: draft.seconds,
+          }));
+        }
+        setProjectId(project.id);
+        selectProject(project.id);
         const publishMeta = buildMeta({ ...project, scenes: nextScenes }, series.name);
         const { w, h } = dimensionsFor(project);
 
+        // ١) صور المشاهد — نترك للمزوّد أن يقول كم ننتظر بدل نوم ثابت.
         const imageProvider = activeProvider('image');
         const useProvider = imageProvider.kind !== 'local' && isReady(imageProvider) && imageSupported(imageProvider);
         const imageIds = new Map<string, string>();
+        const totalScenes = nextScenes.length;
         for (const [index, scene] of nextScenes.entries()) {
+          const imageProgress: StageProgress = { stage: 'images', done: index, total: totalScenes };
+          setStageProgress(imageProgress);
+          setRatio(overallRatio(imageProgress));
           const id = newId('im');
           let blob: Blob = sceneCardBlob(index, w, h);
           let mime = 'image/svg+xml';
           let name = `${scene.id}.svg`;
           if (useProvider) {
-            if (imageProvider.kind === 'pollinations' && index > 0) {
-              await new Promise((resolve) => setTimeout(resolve, 46_000));
-            }
             try {
-              blob = await generateSceneImage(imageProvider, scene.visual || scene.text, draft.aspect);
+              blob = await withRetryAfter(
+                () => generateSceneImage(imageProvider, scene.visual || scene.text, draft.aspect),
+                (wait) =>
+                  setStageProgress({
+                    ...imageProgress,
+                    note: `الحد المجاني: ننتظر ${Math.ceil(wait / 1000)} ثانية`,
+                  }),
+              );
               mime = blob.type || 'image/png';
               name = `${scene.id}.png`;
             } catch (error) {
@@ -214,6 +269,56 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
           ...scene,
           imageId: imageIds.get(scene.id),
         }));
+        const audioIds: string[] = [];
+
+        // ٢) التعليق الصوتي الحقيقي: مزوّد صوت → Blob → داخل الفيديو.
+        const voiceProvider = activeProvider('voice');
+        const wantVoice = voiceProvider.kind !== 'local' && isReady(voiceProvider) && speechSupported(voiceProvider);
+        const audioBlobs: Record<string, Blob> = {};
+        const audioDurations: Record<string, number> = {};
+        let voiceNote: string | undefined;
+        if (wantVoice) {
+          for (const [index, scene] of finalScenes.entries()) {
+            const voiceProgress: StageProgress = { stage: 'voice', done: index, total: finalScenes.length };
+            setStageProgress(voiceProgress);
+            setRatio(overallRatio(voiceProgress));
+            try {
+              const blob = await withRetryAfter(
+                () => synthesizeSpeech(voiceProvider, scene.text, draft.lang),
+                (wait) =>
+                  setStageProgress({
+                    ...voiceProgress,
+                    note: `الحد المجاني: ننتظر ${Math.ceil(wait / 1000)} ثانية`,
+                  }),
+              );
+              const spoken = await blobSeconds(blob).catch(() => 0);
+              const audioId = newId('au');
+              await putAsset({
+                id: audioId,
+                kind: 'audio',
+                name: `${scene.id}.mp3`,
+                mime: blob.type || 'audio/mpeg',
+                blob,
+                duration: spoken,
+                createdAt: Date.now(),
+              });
+              audioIds.push(audioId);
+              scene.audioId = audioId;
+              if (spoken) {
+                scene.audioSeconds = spoken;
+                audioDurations[scene.id] = spoken;
+              }
+              audioBlobs[scene.id] = blob;
+              setStageProgress({ stage: 'voice', done: index + 1, total: finalScenes.length });
+            } catch (error) {
+              voiceNote = error instanceof Error ? error.message : 'تعذّر توليد التعليق الصوتي';
+              break;
+            }
+          }
+        } else if (voiceProvider.kind === 'local') {
+          voiceNote = 'الصوت المحلي في المتصفح ما يتسجلش داخل MP4';
+        }
+
         const finalProject: Project = {
           ...project,
           scenes: finalScenes,
@@ -223,9 +328,19 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
           meta: publishMeta,
         };
         updateProject(project.id, () => finalProject);
-        selectProject(project.id);
-        setProjectId(project.id);
         setMeta(publishMeta);
+
+        // الصور والصوت القديمة من محاولة سابقة تُمسح فورًا حتى لا تتراكم في ذاكرة الهاتف.
+        if (existing) {
+          const keep = new Set<string>([
+            ...imageIds.values(),
+            ...audioIds,
+            ...(existing.exports ?? []).map((item) => item.id),
+            ...referencedAssetIds({ ...existing, scenes: [] }),
+          ]);
+          const stale = referencedAssetIds(existing).filter((assetId) => !keep.has(assetId));
+          if (stale.length) void deleteAssets(stale);
+        }
 
         const visuals: Record<number, VisualFrame> = {};
         for (const [index, scene] of finalScenes.entries()) {
@@ -240,16 +355,26 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
           }
         }
 
+        // ٣) التصدير: قفل الشاشة + تحذير لو خرج المستخدم من التطبيق.
+        const readyProgress: StageProgress = { stage: 'render', done: 0, total: 1 };
+        setStageProgress(readyProgress);
+        setRatio(overallRatio(readyProgress));
+        releaseWake = await keepAwake();
+        stopWatch = watchVisibility(() =>
+          toast('خرجت من التطبيق أثناء التسجيل — رجّع التبويب حتى يكمّل الفيديو', 'error'),
+        );
         track('export_started', { project_id: project.id, aspect: draft.aspect, seconds: draft.seconds });
         const output = await exportVideo({
           project: finalProject,
           seriesName: series.name,
           canvas,
           getVisual: (index) => visuals[index] ?? null,
-          audioBlobs: {},
-          audioDurations: {},
+          audioBlobs,
+          audioDurations,
           onProgress: (value, seconds) => {
-            setRatio(value);
+            const renderProgress: StageProgress = { stage: 'render', done: value, total: 1 };
+            setStageProgress(renderProgress);
+            setRatio(overallRatio(renderProgress));
             setProgressSeconds(seconds);
           },
         });
@@ -264,6 +389,13 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
           duration: output.duration,
           createdAt: Date.now(),
         });
+        addExport(project.id, {
+          id: assetId,
+          name: output.filename,
+          bytes: output.blob.size,
+          duration: output.duration,
+          createdAt: Date.now(),
+        });
         setStage(project.id, 'ready');
         setVideo({ url: URL.createObjectURL(output.blob), name: output.filename, assetId });
         setStep('done');
@@ -273,11 +405,15 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
           is_mp4: output.format.isMp4,
           bytes: output.blob.size,
           seconds: Math.round(output.duration),
+          has_audio: output.hasAudio,
         });
+        const audioLine = output.hasAudio
+          ? 'التعليق الصوتي والموسيقى داخلين.'
+          : `${output.mutedReason ?? 'بلا تعليق صوتي.'}${voiceNote && !output.mutedReason ? ` (${voiceNote})` : ''}`;
         push({
           id: newId('ms'),
           role: 'ai',
-          text: `ها هو الفيديو: ${finalScenes.length} مشاهد، ${formatClock(output.duration)}، ${output.format.label}. الترجمة والموسيقى داخلو، وما فيهش تعليق صوتي — تقدر تسجل صوتك من التحرير اليدوي.`,
+          text: `ها هو الفيديو: ${finalScenes.length} مشاهد، ${formatClock(output.duration)}، ${output.format.label}. الترجمة داخلة. ${audioLine}`,
           card: 'video',
           chips: ['تحرير يدوي', 'فيديو جديد'],
         });
@@ -288,15 +424,17 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
         push({
           id: newId('ms'),
           role: 'ai',
-          text: `توقف التصدير: ${message}`,
+          text: `توقف التصدير: ${message}. المشروع محفوظ — «اصنع الفيديو» يكمّل عليه بلا مشروع جديد.`,
           card: 'error',
           chips: ['اصنع الفيديو'],
         });
       } finally {
+        stopWatch?.();
+        releaseWake?.();
         setBusy(false);
       }
     },
-    [createProject, createSeries, draft, push, selectProject, setStage, state.series, toast, updateProject],
+    [addExport, createProject, createSeries, draft, projectId, push, selectProject, setStage, state.projects, state.series, toast, updateProject],
   );
 
   const rebuild = useCallback(
@@ -527,6 +665,17 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
       return;
     }
     downloadBlob(asset.blob, video.name || `${slugify(draft.idea)}.mp4`);
+    // بعد التنزيل: لو الذاكرة قاربت تمتلئ نمسح أقدم تصدير، فالفيديو في يدك أصلًا.
+    try {
+      const usage = await storageUsage();
+      const pressure = usage.quota > 0 ? usage.used / usage.quota : 0;
+      if (pressure > 0.7) {
+        const removed = await cleanupStorage();
+        if (removed) toast(`نزّلناه ومسحنا ${removed} ملف قديم (${formatBytes(usage.used)}) من الجهاز`, 'ok');
+      }
+    } catch {
+      /* القياس اختياري */
+    }
   };
 
   const totalSeconds = scenes.reduce((sum, scene) => sum + scene.seconds, 0);
@@ -623,7 +772,11 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
                 <p className="chat__text">
                   كنصدّر الفيديو… {Math.round(ratio * 100)}% ({formatClock(progressSeconds)} / {formatClock(totalSeconds)})
                 </p>
-                <Progress value={ratio} label="تقدّم التصدير" />
+                <p className="chat__stage" role="status">
+                  {stageLabel(stageProgress)}
+                  {stageProgress.note ? ` — ${stageProgress.note}` : ''}
+                </p>
+                <Progress value={ratio} label={stageLabel(stageProgress)} />
                 <p className="chat__hint">
                   التصدير كيتم في الوقت الحقيقي، ما تسدش التبويب حتى يسالي.
                 </p>

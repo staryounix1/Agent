@@ -43,7 +43,15 @@ function openDb(): Promise<IDBDatabase> {
         if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id' });
       };
       req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
+      // فشل واحد (مثل وضع التصفح الخاص) لا يُثبَّت للأبد: المحاولة القادمة تعيد الفتح.
+      req.onerror = () => {
+        dbPromise = null;
+        reject(req.error);
+      };
+      req.onblocked = () => {
+        dbPromise = null;
+        reject(new Error('قاعدة البيانات مشغولة في تبويب آخر'));
+      };
     });
   }
   return dbPromise;
@@ -73,7 +81,45 @@ export async function deleteAsset(id: string): Promise<void> {
     URL.revokeObjectURL(url);
     urlCache.delete(id);
   }
+  assetCache.delete(id);
   await withStore('readwrite', (store) => store.delete(id));
+}
+
+/** يمسح مجموعة أصول ويعيد عدد ما مُسح فعلًا (بلا توقف عند أول فشل). */
+export async function deleteAssets(ids: string[]): Promise<number> {
+  let removed = 0;
+  for (const id of new Set(ids)) {
+    try {
+      await deleteAsset(id);
+      removed += 1;
+    } catch {
+      /* أصل واحد فشل مسحه: نكمل الباقي */
+    }
+  }
+  return removed;
+}
+
+export async function allAssets(): Promise<Asset[]> {
+  return withStore('readonly', (store) => store.getAll() as IDBRequest<Asset[]>);
+}
+
+/** المساحة المستعملة على الجهاز للفيديوهات والصور، ونسبة ما تسمح به المتصفح. */
+export async function storageUsage(): Promise<{ used: number; quota: number; files: number }> {
+  let assets: Asset[] = [];
+  try {
+    assets = await allAssets();
+  } catch {
+    assets = [];
+  }
+  const used = assets.reduce((sum, asset) => sum + (asset.blob?.size ?? 0), 0);
+  let quota = 0;
+  try {
+    const estimate = await navigator.storage?.estimate?.();
+    quota = estimate?.quota ?? 0;
+  } catch {
+    quota = 0;
+  }
+  return { used, quota, files: assets.length };
 }
 
 const urlCache = new Map<string, string>();

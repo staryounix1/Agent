@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { ASPECTS, LANGS, type View } from '../types';
 import { Button, Empty, Field, Icon, Pipeline, Progress, useToast } from '../ui';
-import { loadAsset } from '../lib/storage';
+import { loadAsset, newId, putAsset } from '../lib/storage';
 import { ambientBuffer, audioContext, decodeBlob } from '../lib/audio';
 import { drawFrame, ensureCaptionFonts, frameOptionsFor, type VisualFrame } from '../lib/render';
 import { buildTimeline, formatClock, sceneAt } from '../lib/timeline';
@@ -19,7 +19,7 @@ import {
 import { track } from '../lib/analytics';
 
 export function EditView({ onGo }: { onGo: (view: View) => void }) {
-  const { state, project, updateProject, setStage, saveMusic } = useStore();
+  const { state, project, updateProject, setStage, saveMusic, addExport } = useStore();
   const toast = useToast();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const visualsRef = useRef<Record<number, VisualFrame>>({});
@@ -285,6 +285,23 @@ export function EditView({ onGo }: { onGo: (view: View) => void }) {
       });
       setResult(output);
       setStage(project.id, 'ready');
+      const videoId = newId('vd');
+      await putAsset({
+        id: videoId,
+        kind: 'video',
+        name: output.filename,
+        mime: output.format.mime,
+        blob: output.blob,
+        duration: output.duration,
+        createdAt: Date.now(),
+      });
+      addExport(project.id, {
+        id: videoId,
+        name: output.filename,
+        bytes: output.blob.size,
+        duration: output.duration,
+        createdAt: Date.now(),
+      });
       updateProject(project.id, (p) => ({
         ...p,
         exportCount: p.exportCount + 1,
@@ -297,8 +314,14 @@ export function EditView({ onGo }: { onGo: (view: View) => void }) {
         is_mp4: output.format.isMp4,
         bytes: output.blob.size,
         seconds: Math.round(output.duration),
+        has_audio: output.hasAudio,
       });
-      toast('الفيديو جاهز — نزّله أو انسخ نص النشر');
+      toast(
+        output.hasAudio
+          ? 'الفيديو جاهز بالصوت — نزّله أو انسخ نص النشر'
+          : `الفيديو جاهز — ${output.mutedReason ?? 'بلا صوت'} وتقدر تسجّل تعليقك من هنا`,
+        output.hasAudio ? 'ok' : 'error',
+      );
       setProgress(1);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'تعذّر التصدير';

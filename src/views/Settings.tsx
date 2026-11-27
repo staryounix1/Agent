@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button, Icon, useToast } from '../ui';
 import {
   KINDS,
   STAGES,
+  freeSettings,
+  isFree,
   isReady,
   loadSettings,
   newProvider,
@@ -13,6 +15,9 @@ import {
   type StageId,
 } from '../lib/providers';
 import { testProvider } from '../lib/ai';
+import { formatBytes } from '../lib/assets';
+import { useStore } from '../store';
+import { storageUsage } from '../lib/storage';
 
 export function SettingsView() {
   const toast = useToast();
@@ -22,6 +27,73 @@ export function SettingsView() {
   const [addLabel, setAddLabel] = useState('');
   const [testing, setTesting] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, { ok: boolean; text: string }>>({});
+  const { cleanupStorage, exportBackupFile, importBackupFile } = useStore();
+  const [usage, setUsage] = useState<{ used: number; quota: number; files: number } | null>(null);
+  const [cleaning, setCleaning] = useState(false);
+  const [busyBackup, setBusyBackup] = useState(false);
+  const backupInput = useRef<HTMLInputElement>(null);
+
+  const refreshUsage = () => {
+    storageUsage()
+      .then(setUsage)
+      .catch(() => setUsage(null));
+  };
+
+  const backup = async () => {
+    setBusyBackup(true);
+    try {
+      const { blob, skipped } = await exportBackupFile();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const stamp = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.download = `mashhad-backup-${stamp}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      toast(skipped ? `خرجت النسخة، وتخطّينا ${skipped} ملفًا كبيرًا` : 'خرجت النسخة الاحتياطية');
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'تعذّر تصدير النسخة', 'error');
+    } finally {
+      setBusyBackup(false);
+    }
+  };
+
+  const restore = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setBusyBackup(true);
+    try {
+      const result = await importBackupFile(file);
+      refreshUsage();
+      toast(
+        result.projects
+          ? `وصل ${result.projects} مشروع و${result.assets} ملف`
+          : 'الملف مقروء — كل مشاريعه موجودة عندك',
+      );
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'تعذّر استيراد النسخة', 'error');
+    } finally {
+      setBusyBackup(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshUsage();
+  }, []);
+
+  const cleanup = async () => {
+    setCleaning(true);
+    try {
+      const removed = await cleanupStorage();
+      refreshUsage();
+      toast(removed ? `تمسح ${removed} ملف غير مستعمل` : 'ما لقيناش ملفات زايدة');
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'تعذّر التنظيف', 'error');
+    } finally {
+      setCleaning(false);
+    }
+  };
 
   useEffect(() => {
     saveSettings(settings);
@@ -80,12 +152,69 @@ export function SettingsView() {
       <section className="card panel">
         <div className="panel__head">
           <h2>
+            <Icon name="film" size={18} /> مساحة الجهاز
+          </h2>
+        </div>
+        <p className="small muted">
+          الصور والأصوات والفيديوهات تبقى في هذا الجهاز فقط. حذف مشروع يمسح ملفاته، ونحتفظ بآخر ٣ فيديوهات لكل مشروع.
+        </p>
+        <div className="row">
+          <div>
+            <div className="field__label">المستعمل: {usage ? formatBytes(usage.used) : 'كنحسب…'}</div>
+            <div className="field__hint">
+              {usage ? `${usage.files} ملف` : '…'}
+              {usage?.quota ? ` · سقف المتصفح ${formatBytes(usage.quota)}` : ''}
+            </div>
+          </div>
+          <Button size="sm" icon="trash" onClick={cleanup} disabled={cleaning}>
+            {cleaning ? 'كننظف…' : 'نظّف الملفات غير المستعملة'}
+          </Button>
+        </div>
+        <div className="row" style={{ marginTop: 12 }}>
+          <Button size="sm" icon="download" onClick={backup} disabled={busyBackup}>
+            {busyBackup ? 'كنجهّز…' : 'صدّر نسخة احتياطية'}
+          </Button>
+          <Button size="sm" icon="upload" onClick={() => backupInput.current?.click()} disabled={busyBackup}>
+            استورد نسخة
+          </Button>
+          <input
+            ref={backupInput}
+            type="file"
+            accept="application/json,.json"
+            hidden
+            onChange={restore}
+          />
+        </div>
+        <p className="field__hint">
+          النسخة تحمل المشاريع والصور والأصوات في ملف JSON واحد. الاستيراد يضيف الناقص فقط ولا يمسح الموجود.
+        </p>
+      </section>
+
+      <section className="card panel">
+        <div className="panel__head">
+          <h2>
             <Icon name="sparkles" size={18} /> المزوّدون حسب المرحلة
           </h2>
         </div>
         <p className="small muted">
-          كل مرحلة تختار مزوّدها المستقل: النص عند Google، الفيديو عند Grok، وهكذا. المفاتيح تبقى مخزّنة في هذا الجهاز فقط، ولا تُرسل لأي جهة غير المزوّد نفسه.
+          كل مرحلة تختار مزوّدها المستقل: السكريبت عند Google أو عند Pollinations المجاني، الفيديو عند Grok، وهكذا. المفاتيح تبقى مخزّنة في هذا الجهاز فقط، ولا تُرسل لأي جهة غير المزوّد نفسه.
         </p>
+
+        <div className="free-row">
+          <div className="free-row__text">
+            <strong>جاهز بلا مفتاح:</strong> السكريبت والصور من Pollinations، والتعليق الصوتي من Google، والتركيب داخل الجهاز.
+          </div>
+          <Button
+            size="sm"
+            icon="sparkles"
+            onClick={() => {
+              setSettings((current) => freeSettings(current));
+              toast('تشغّل الوضع المجاني: نص وصور بلا مفتاح');
+            }}
+          >
+            شغّل المجاني
+          </Button>
+        </div>
 
         {STAGES.map((stage) => {
           const options = settings.providers.filter((provider) => provider.stage === stage.id);
@@ -106,7 +235,7 @@ export function SettingsView() {
                   {options.map((provider) => (
                     <option key={provider.id} value={provider.id}>
                       {provider.label}
-                      {provider.kind === 'local' ? '' : isReady(provider) ? ' ✓' : ' (بلا مفتاح)'}
+                      {provider.kind === 'local' ? '' : isFree(provider) ? ' ✓' : isReady(provider) ? ' ✓' : ' (بلا مفتاح)'}
                     </option>
                   ))}
                 </select>
@@ -194,7 +323,13 @@ export function SettingsView() {
               <strong>{provider.label}</strong>
               <span className="badge">
                 {STAGES.find((stage) => stage.id === provider.stage)?.label}
-                {provider.kind === 'local' ? ' · محلي' : isReady(provider) ? ' · جاهز' : ' · بلا مفتاح'}
+                {provider.kind === 'local'
+                  ? ' · محلي'
+                  : isFree(provider)
+                    ? ' · مجاني'
+                    : isReady(provider)
+                      ? ' · جاهز'
+                      : ' · بلا مفتاح'}
               </span>
             </div>
 
@@ -228,16 +363,20 @@ export function SettingsView() {
                   <div className="field">
                     <span className="field__label">المفتاح</span>
                     <div className="key-row">
-                      <input
-                        className="input num"
-                        dir="ltr"
-                        type="password"
-                        autoComplete="off"
-                        spellCheck={false}
-                        value={provider.key}
-                        onChange={(event) => update(provider.id, { key: event.target.value })}
-                        placeholder={provider.kind === 'pollinations' ? 'لا يحتاج مفتاحًا' : 'sk-…'}
-                      />
+                      {isFree(provider) ? (
+                        <span className="field__hint key-free">لا يحتاج مفتاحًا — يعمل مباشرة.</span>
+                      ) : (
+                        <input
+                          className="input num"
+                          dir="ltr"
+                          type="password"
+                          autoComplete="off"
+                          spellCheck={false}
+                          value={provider.key}
+                          onChange={(event) => update(provider.id, { key: event.target.value })}
+                          placeholder="sk-…"
+                        />
+                      )}
                       <Button
                         size="sm"
                         variant="quiet"
@@ -276,9 +415,12 @@ export function SettingsView() {
           </h3>
         </div>
         <ul className="notes">
+          <li>«شغّل المجاني» يضبط النص والصور على Pollinations، والتعليق على «Google صوت» بلا مفتاح، والتركيب داخل الجهاز — التطبيق كامل بلا أي حساب.</li>
+          <li>«Google صوت» يمر عبر الدالة `api/tts.js` على الويب، وداخل APK يتصل بـGoogle مباشرة بلا خادم.</li>
+          <li>Pollinations نص يكتب السكريبت بالعربية (~5 ثوان)؛ إن كان الإنترنت مقطوعًا يرجع التطبيق تلقائيًا إلى القوالب المدمجة. بلا إنترنت دائمًا؟ اختر «قوالب مدمجة» للنص.</li>
           <li>أي مزوّد بلا مفتاح يُتجاهل، ويعود التطبيق للمزوّد المحلي تلقائيًا.</li>
           <li>مزوّد الفيديو (Grok) يحتاج اتصالًا بالخادم: دالة `api/grok-video.js` تعمل على Vercel، وليست داخل نسخة APK.</li>
-          <li>التعليق الصوتي الآلي محفوظ في الإعدادات، لكنه غير مربوط بمسار التصدير بعد.</li>
+          <li>التعليق الصوتي المختار هنا هو الذي يُسجَّل داخل الفيديو عند «اصنع الفيديو»، وحده «تسجيل من الجهاز» لا يدخل MP4.</li>
           <li>بعض المزوّدين يمنعون الاتصال من المتصفح (CORS)؛ عندها استخدم مزوّدًا يسمح بذلك.</li>
           <li>في نسخة APK تبقى المفاتيح داخل التطبيق فقط، وتُحذف بحذف بيانات التطبيق.</li>
         </ul>

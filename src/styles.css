@@ -2157,6 +2157,11 @@ input[type='range'] {
   display: grid;
   gap: var(--sp-2);
   justify-items: stretch;
+  min-width: 0;
+}
+
+.stage-row > * {
+  min-width: 0;
 }
 
 .row-buttons {
@@ -2239,4 +2244,40 @@ input[type='range'] {
 
 .field__hint.is-error {
   color: var(--danger);
+}
+
+.key-free {
+  flex: 1;
+  min-width: 0;
+  color: var(--ok);
+}
+
+.free-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-3);
+  border: 1px solid rgba(255, 176, 87, 0.32);
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+}
+
+.free-row__text {
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--text);
+  min-width: 12rem;
+  flex: 1;
+}
+
+@media (max-width: 420px) {
+  .free-row {
+    align-items: stretch;
+  }
+
+  .free-row .btn {
+    width: 100%;
+  }
 }

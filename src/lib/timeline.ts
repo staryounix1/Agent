@@ -170,12 +170,17 @@ export function coverRect(
   };
 }
 
+/** توقيت كل تعليق داخل التسجيل: بداية الفيديو + بداية مشهده. */
+export function audioSchedule(timeline: Timeline, startAt: number): { sceneId: string; at: number }[] {
+  return timeline.scenes.map((timed) => ({ sceneId: timed.scene.id, at: startAt + timed.start }));
+}
+
 export function formatSrtTime(seconds: number): string {
-  const total = Math.max(0, seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = Math.floor(total % 60);
-  const ms = Math.round((total - Math.floor(total)) * 1000);
+  const totalMs = Math.round(Math.max(0, seconds) * 1000);
+  const h = Math.floor(totalMs / 3_600_000);
+  const m = Math.floor((totalMs % 3_600_000) / 60_000);
+  const s = Math.floor((totalMs % 60_000) / 1000);
+  const ms = totalMs % 1000;
   const pad = (n: number, size = 2) => String(n).padStart(size, '0');
   return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
 }

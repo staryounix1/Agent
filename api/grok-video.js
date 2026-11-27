@@ -1,6 +1,14 @@
 import { getGrokVideo, grokKey, proxyGrokVideo, startGrokVideo } from '../server/grok.js';
+import { authorize } from '../server/guard.js';
 
 export default async function handler(req, res) {
+  const verdict = authorize(req);
+  if (!verdict.ok) {
+    if (verdict.retryAfterMs) res.setHeader('Retry-After', Math.ceil(verdict.retryAfterMs / 1000));
+    res.status(verdict.status).json({ error: verdict.error });
+    return;
+  }
+
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
   if (req.method === 'GET' && url.searchParams.get('ping')) {
