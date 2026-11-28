@@ -40,13 +40,18 @@ test.describe('chat to video', () => {
     expect(scenes).toBeGreaterThanOrEqual(3);
 
     await page.getByRole('button', { name: 'اصنع الفيديو' }).first().click();
-    await expect(page.getByText('نجيب صور المشاهد')).toBeVisible();
+    // سطر المرحلة الحالية: التسمية تعتمد على المزوّد المتاح (قد تُتخطى مرحلة الصور
+    // لما يكون مزوّد الصور غير متاح)، فنتحقق من التسمية المسماة لا من مرحلة بعينها.
+    await expect(page.getByRole('status')).toHaveText(
+      /نجيب صور المشاهد|نسجّل التعليق الصوتي|نصدّر الفيديو/,
+    );
 
     await expect(page.getByRole('button', { name: 'تنزيل الفيديو' })).toBeVisible({ timeout: 90_000 });
     await expect(page.getByText(/ها هو الفيديو/)).toBeVisible();
     await expect(page.locator('.chat__player')).toBeVisible();
 
-    // بعد التصدير: مشروع واحد فقط، وفيديو محفوظ واحد.
+    // بعد التصدير: مشروع واحد فقط، وفيديو محفوظ واحد (ننتظر كتابة الحفظ).
+    await expect.poll(async () => (await projects(page))[0]?.exports?.length ?? 0).toBe(1);
     const list = await projects(page);
     expect(list).toHaveLength(1);
     expect(list[0].exports?.length ?? 0).toBe(1);
@@ -82,6 +87,8 @@ test.describe('chat to video', () => {
     await page.getByRole('button', { name: 'اصنع الفيديو' }).last().click();
     await expect(page.getByRole('button', { name: 'تنزيل الفيديو' })).toBeVisible({ timeout: 90_000 });
 
+    // السجل يُحفظ بعد التصيير، فننتظر كتابته بدل قراءة لحظية.
+    await expect.poll(async () => (await projects(page))[0]?.exports?.length ?? 0).toBe(1);
     const afterRetry = await projects(page);
     expect(afterRetry).toHaveLength(1);
     expect(afterRetry[0].id).toBe(afterFailure[0].id);

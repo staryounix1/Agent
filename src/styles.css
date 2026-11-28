@@ -2064,6 +2064,14 @@ input[type='range'] {
   background: #000;
 }
 
+/* سطر المرحلة الحالية أثناء التصدير — مش مسرح الفيديو. */
+.chat__stage-note {
+  margin: 4px 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  line-height: 1.65;
+  color: var(--muted);
+}
+
 .chat__player {
   width: 100%;
   height: 100%;

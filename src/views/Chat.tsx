@@ -772,7 +772,7 @@ export function ChatView({ onOpen }: { onOpen: (view: View) => void }) {
                 <p className="chat__text">
                   كنصدّر الفيديو… {Math.round(ratio * 100)}% ({formatClock(progressSeconds)} / {formatClock(totalSeconds)})
                 </p>
-                <p className="chat__stage" role="status">
+                <p className="chat__stage-note" role="status">
                   {stageLabel(stageProgress)}
                   {stageProgress.note ? ` — ${stageProgress.note}` : ''}
                 </p>
